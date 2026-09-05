@@ -1,0 +1,63 @@
+# The entry point. Everything from outside -- the editor, the REST API, webhook calls -- arrives
+# here and is routed to Main.
+#
+# Two resources, deliberately owned by different people. That split is the reason Gateway API
+# exists, and it is the whole difference from an Ingress:
+#
+#   Gateway    the platform team's object. It says which ports are open, on which controller,
+#              and which namespaces are allowed to attach routes to it.
+#   HTTPRoute  the application team's object. It lives beside the app, names its own hostname
+#              and its own Service, and cannot grant itself anything the Gateway did not offer.
+#
+# With an Ingress, both of those live in one object in the app's namespace, so "may this team
+# publish on this hostname" is not a question the cluster can answer.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: platform
+  namespace: infra
+spec:
+  # Created by the Traefik chart in scripts/20-operators.sh.
+  gatewayClassName: traefik
+
+  listeners:
+    - name: web
+      protocol: HTTP
+      # Traefik matches a listener to one of its entrypoints by port number, and its `web`
+      # entrypoint listens on 8000 inside the container. This is not the port anyone connects to:
+      # the Service publishes it as NodePort 30080, which kind forwards from the host's port 80.
+      port: 8000
+      allowedRoutes:
+        namespaces:
+          # Not "Same" (only this namespace) and not "All" (any namespace can publish here).
+          # A namespace attaches routes when it carries the label below -- kubernetes/00-namespace.yaml
+          # is where that grant is written down.
+          from: Selector
+          selector:
+            matchLabels:
+              gateway-access: n8n
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: n8n
+  namespace: n8n
+spec:
+  parentRefs:
+    - name: platform
+      namespace: infra
+      sectionName: web
+  # n8n.localtest.me is a public DNS name that resolves to 127.0.0.1 for everyone, so this works
+  # with no /etc/hosts entry on any machine.
+  hostnames:
+    - n8n.localtest.me
+  rules:
+    - backendRefs:
+        - name: n8n-main
+          port: 5678
+      timeouts:
+        # A workflow can take longer to answer than the proxy's default, and a timeout here
+        # surfaces as a 504 that looks like an n8n bug. Both values are Gateway API's own fields
+        # rather than controller-specific annotations, which is the other thing this API buys.
+        request: 300s
+        backendRequest: 300s

@@ -1,0 +1,72 @@
+# Two jobs. `lint` catches the mistakes that are cheap to catch; `e2e` builds the whole platform
+# on a runner and calls the webhook, which is the only check that proves the README is true.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Upstream moves: a new n8n release, a new operator version. A weekly run catches a break
+  # before someone cloning the repo does.
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: yamllint
+        run: pipx install yamllint && yamllint -c .yamllint.yaml .
+
+      - name: shellcheck
+        # -x so it follows the sourced scripts/common.sh, as pre-commit does.
+        run: shellcheck -x scripts/*.sh
+
+      - name: kubeconform
+        run: |
+          curl -sSLo /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
+          # -ignore-missing-schemas because half of kubernetes/ is custom resources -- CNPG
+          # Clusters, KEDA ScaledObjects, Redis replications -- whose schemas live in CRDs that
+          # are not installed on the runner. The built-in Kubernetes kinds are still checked.
+          /tmp/kubeconform -strict -summary -ignore-missing-schemas kubernetes/
+
+  e2e:
+    runs-on: ubuntu-latest
+    # Image pulls dominate: n8n alone is over a gigabyte, and there are six more.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: helm/kind-action@v1
+        with:
+          version: v0.30.0
+          config: kind/cluster.yaml
+          cluster_name: n8n
+
+      # kind-action has already created the cluster, so `make all` would delete and rebuild it.
+      - name: deploy
+        run: |
+          make operators
+          make secrets
+          make deploy
+          make seed
+
+      - name: verify a Worker executed the webhook
+        run: make verify
+
+      - name: spread 1500 requests across the Workers
+        run: make fanout N=1500
+
+      - name: failover and NetworkPolicy drills
+        run: make drill
+
+      - name: diagnostics on failure
+        if: failure()
+        run: |
+          kubectl --context kind-n8n get pods -A -o wide
+          kubectl --context kind-n8n -n n8n describe pods
+          kubectl --context kind-n8n -n n8n logs -l app=n8n --tail=100 --prefix || true

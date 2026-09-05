@@ -1,0 +1,32 @@
+# Runs on every commit. Three checks, each guarding a mistake that has actually happened here.
+repos:
+  # Never commit a secret. Everything sensitive is generated at deploy time by
+  # scripts/30-secrets.sh or by CloudNativePG, so anything secret-shaped in a diff is a mistake.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # The manifests are applied directly, so a YAML error is a broken deployment.
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        args: [-c, .yamllint.yaml]
+
+  # Catches unquoted expansions and the shell mistakes that cause silent, not loud, failures.
+  # -x so it follows the `. scripts/common.sh` in every script; without it every file reports
+  # SC1091 and the real findings are lost in the noise.
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.10.0
+    hooks:
+      - id: shellcheck
+        args: [-x]
+
+  # Ordinary hygiene.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-json

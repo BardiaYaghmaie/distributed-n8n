@@ -1,0 +1,19 @@
+# yamllint config. Relaxed where strictness would fight readable, heavily commented manifests.
+extends: default
+
+rules:
+  # The manifests use long explanatory comments; wrapping them at 80 would hurt more than help.
+  line-length:
+    max: 110
+    allow-non-breakable-words: true
+  # Kubernetes manifests conventionally indent list items under their key.
+  indentation:
+    indent-sequences: consistent
+  # "on:" and "yes"/"no" as strings are fine here.
+  truthy:
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  # Each file opens with a comment block explaining the whole file. A leading "---" above that
+  # header reads as noise, and these are applied by kubectl, not concatenated by hand.
+  document-start: disable

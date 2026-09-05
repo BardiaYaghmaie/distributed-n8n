@@ -1,0 +1,13 @@
+# The application namespace. n8n, its PostgreSQL cluster and its Redis all live here; the
+# operators that manage them live in `infra`, created by scripts/20-operators.sh.
+#
+# The split is what makes `kubectl delete namespace n8n` a complete uninstall of the workload
+# that cannot take an operator down with it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: n8n
+  labels:
+    # The Gateway in kubernetes/60-gateway.yaml only accepts routes from namespaces carrying this
+    # label. Attaching a route to a shared entry point is a privilege, and this is the grant.
+    gateway-access: n8n

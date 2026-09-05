@@ -1,0 +1,192 @@
+# Network policy for the n8n namespace: deny everything, then allow the six flows that exist.
+#
+# These are enforced here. kind has shipped NetworkPolicy support in its default CNI since
+# v0.24 (kube-network-policies), so this is not decoration -- `make drill` proves it by trying a
+# connection that must fail. On a cluster whose CNI ignores NetworkPolicy these objects are
+# accepted and do nothing, which is worth knowing before relying on them.
+#
+# Every rule below uses `kubernetes.io/metadata.name`, a label Kubernetes puts on every namespace
+# itself, so nothing here depends on someone remembering to label a namespace by hand.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: n8n
+spec:
+  # An empty podSelector selects every pod in the namespace. With both policy types listed and no
+  # rules, nothing may enter or leave -- including DNS, which is why the next policy exists.
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: n8n
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# The Gateway is the only thing outside this namespace allowed to reach n8n, and only Main.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-main
+  namespace: n8n
+spec:
+  podSelector:
+    matchLabels:
+      app: n8n
+      component: main
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: infra
+      ports:
+        - protocol: TCP
+          port: 5678
+---
+# n8n reaches its own database and queue, and nothing else inside the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-n8n-to-data
+  namespace: n8n
+spec:
+  podSelector:
+    matchLabels:
+      app: n8n
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: n8n-pg
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: n8n-redis
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+# Workers execute whatever a workflow says, and most workflows call an external API. Main gets no
+# such rule: it talks to the database and the queue, and a Main that can reach the internet is
+# only useful to an attacker.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker-egress-internet
+  namespace: n8n
+spec:
+  podSelector:
+    matchLabels:
+      app: n8n
+      component: worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            # Everything except private space. Without these exclusions the rule above would also
+            # grant a Worker access to every other pod and every Service in the cluster, which is
+            # the opposite of what "may call an external API" is meant to allow.
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+---
+# PostgreSQL accepts connections from n8n, from its own replicas (streaming replication), and
+# from the CloudNativePG operator, which manages and monitors it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-ingress
+  namespace: n8n
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: n8n-pg
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: n8n
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: n8n-pg
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: infra
+  egress:
+    # Replicas stream from the primary, and the instance manager talks to the operator and the
+    # API server. Restricting this further means chasing the operator's internal ports on every
+    # upgrade, for a component that is already the most privileged thing in the namespace.
+    # An egress rule with no `to` and no `ports` means "anywhere".
+    - to: []
+---
+# Redis accepts connections from n8n, from its own replicas, from Sentinel, and from the
+# operator and KEDA in infra.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis-ingress
+  namespace: n8n
+spec:
+  # Selected on redis_setup_type rather than on `app`, because the operator names the Sentinel
+  # StatefulSet after its CR plus a suffix -- `n8n-redis-sentinel-sentinel` -- and a policy that
+  # silently stops matching after a rename is worse than no policy.
+  podSelector:
+    matchExpressions:
+      - key: redis_setup_type
+        operator: In
+        values:
+          - replication
+          - sentinel
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: n8n
+        - podSelector:
+            matchExpressions:
+              - key: redis_setup_type
+                operator: In
+                values:
+                  - replication
+                  - sentinel
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: infra
+  egress:
+    # Same reasoning as PostgreSQL: replication and Sentinel gossip between the pods, plus the
+    # API server. An egress rule with no `to` and no `ports` means "anywhere".
+    - to: []

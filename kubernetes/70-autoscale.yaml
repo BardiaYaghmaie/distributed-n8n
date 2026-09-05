@@ -1,0 +1,66 @@
+# Autoscaling the Workers on how deep the queue is.
+#
+# The obvious choice -- a HorizontalPodAutoscaler on CPU -- is the wrong signal for this workload.
+# Most n8n workflows spend their time waiting on an external HTTP call, so a Worker that is fully
+# occupied is nearly idle by CPU. A CPU HPA would scale *down* while the queue grows behind it.
+#
+# KEDA reads the BullMQ list length directly, which is the number that actually means "work is
+# piling up". It creates and drives an HPA underneath; nothing else manages the replica count,
+# which is why kubernetes/50-n8n-worker.yaml has no `replicas` field.
+---
+# The Redis password, handed to KEDA the same way it is handed to n8n: by reference, never as a
+# literal in this file.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: n8n-redis
+  namespace: n8n
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: n8n-redis
+      key: password
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: n8n-worker
+  namespace: n8n
+spec:
+  scaleTargetRef:
+    name: n8n-worker
+
+  # Never fewer than two, so a single Worker restart never leaves the queue with no consumer, and
+  # never zero -- scaling from zero would add cold-start latency to the first request after a
+  # quiet period.
+  minReplicaCount: 2
+  maxReplicaCount: 10
+
+  # KEDA drives a HorizontalPodAutoscaler underneath, and with minReplicaCount above zero the
+  # HPA -- not KEDA -- decides when to remove a pod. So the scale-down behaviour is set here,
+  # where the HPA reads it. (KEDA's own pollingInterval and cooldownPeriod only apply to
+  # scaling from zero, and it warns at apply time if you set them anyway.)
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          # Five minutes of consistently low queue depth before a Worker is removed. Queue bursts
+          # are spiky and removing Workers in the middle of one is self-defeating.
+          stabilizationWindowSeconds: 300
+        scaleUp:
+          # Scale up immediately. A deep queue is a user waiting.
+          stabilizationWindowSeconds: 0
+
+  triggers:
+    - type: redis
+      metadata:
+        address: n8n-redis-master.n8n.svc.cluster.local:6379
+        # BullMQ's list of jobs waiting to be picked up. The `bull:` prefix and the `jobs` queue
+        # name are n8n's defaults; QUEUE_BULL_PREFIX would change the first half.
+        listName: "bull:jobs:wait"
+        # The target depth per Worker. KEDA divides the list length by this and asks for that many
+        # replicas: 40 waiting jobs at 20 each means 2 Workers, 200 means 10 (the cap above).
+        listLength: "20"
+        enableTLS: "false"
+      authenticationRef:
+        name: n8n-redis

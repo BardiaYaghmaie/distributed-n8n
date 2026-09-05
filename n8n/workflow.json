@@ -1,0 +1,44 @@
+{
+  "name": "Distributed Execution Test",
+  "settings": { "executionOrder": "v1" },
+  "nodes": [
+    {
+      "id": "webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "notes": "Entry point. POST http://n8n.localtest.me/webhook/test\n\nresponseMode=lastNode is the important setting: n8n holds the HTTP connection open until the workflow finishes and then returns the last node's output. Because a Worker is what finishes it, a successful response is itself proof that the queue round-trip worked.",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "test",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "process",
+      "name": "Process",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [240, 0],
+      "notes": "The 'simple processing' step. It echoes the two fields from the request, marks them processed, and adds the two fields that make the response evidence rather than decoration:\n\nexecuted_by  = $env.HOSTNAME, which under Kubernetes is the pod name. If it starts with n8n-worker, a Worker ran this.\nexecution_id = the row id in PostgreSQL, so the same execution can be found in the Worker's logs.\n\nA Set node, not a Code node, on purpose: Code nodes run in a separate task-runner process, and this workflow does not need one.",
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "id": "1", "name": "message",      "value": "={{ $json.body.message }}",    "type": "string" },
+            { "id": "2", "name": "request_id",   "value": "={{ $json.body.request_id }}", "type": "string" },
+            { "id": "3", "name": "processed",    "value": "={{ true }}",                  "type": "boolean" },
+            { "id": "4", "name": "executed_by",  "value": "={{ $env.HOSTNAME }}",         "type": "string" },
+            { "id": "5", "name": "execution_id", "value": "={{ $execution.id }}",         "type": "string" }
+          ]
+        },
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Process", "type": "main", "index": 0 }]] }
+  }
+}

@@ -1,0 +1,27 @@
+# The local Kubernetes cluster: one control-plane and three workers.
+#
+# Three workers, not one, because the point of this repo is that the data layer survives losing a
+# machine. CloudNativePG spreads three PostgreSQL instances one per node and the Redis operator
+# does the same with its three replicas -- on a single-node cluster both would be co-located and
+# `make drill` would prove nothing.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: n8n
+
+nodes:
+  - role: control-plane
+    # Pinned so the cluster is the same Kubernetes version on every machine and in CI.
+    image: kindest/node:v1.34.0
+    extraPortMappings:
+      # Traefik is published as a NodePort on 30080 (see scripts/20-operators.sh). Forwarding the
+      # host's port 80 to it is what makes http://n8n.localtest.me work with no port suffix.
+      - containerPort: 30080
+        hostPort: 80
+        protocol: TCP
+
+  - role: worker
+    image: kindest/node:v1.34.0
+  - role: worker
+    image: kindest/node:v1.34.0
+  - role: worker
+    image: kindest/node:v1.34.0

@@ -1,0 +1,117 @@
+# n8n Workers: the processes that actually execute workflows.
+#
+# Same image as Main, different command. `n8n worker` starts no editor and serves no traffic --
+# it connects to Redis, blocks waiting for a job, executes the workflow, writes the result to
+# PostgreSQL, and blocks again. Nothing routes to a Worker; it pulls its own work. That is what
+# makes Workers horizontally scalable: a new one is simply another consumer on the same queue.
+#
+# `replicas` is absent on purpose. KEDA owns this number -- see kubernetes/70-autoscale.yaml.
+# Setting it here as well would make the two fight, each reverting the other on every reconcile.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n8n-worker
+  namespace: n8n
+  labels:
+    app: n8n
+    component: worker
+spec:
+  selector:
+    matchLabels:
+      app: n8n
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: n8n
+        component: worker
+    spec:
+      # Longer than the 30s n8n spends draining in-flight executions when asked to stop. Shorter,
+      # and Kubernetes SIGKILLs a Worker in the middle of an execution.
+      terminationGracePeriodSeconds: 40
+
+      # Spread Workers across nodes so one node failure cannot take out all of them.
+      # ScheduleAnyway keeps it a preference: when KEDA scales past the node count, the extras
+      # still get scheduled rather than sitting Pending.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: n8n
+              component: worker
+
+      containers:
+        - name: n8n
+          image: docker.io/n8nio/n8n:2.37.10
+          # --concurrency is how many executions this one Worker runs at the same time. Total
+          # capacity is replicas x concurrency, and the two dials solve different problems: raise
+          # replicas for CPU-bound work, raise concurrency when Workers idle waiting on I/O.
+          command: ["n8n", "worker", "--concurrency=5"]
+          ports:
+            - name: health
+              containerPort: 5678
+          envFrom:
+            # Byte-for-byte the same map Main loads. That is the point of the split: what must
+            # match is in one object that both reference.
+            - configMapRef:
+                name: n8n-common
+            - configMapRef:
+                name: n8n-worker
+          env:
+            - name: DB_POSTGRESDB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-pg-app
+                  key: username
+            - name: DB_POSTGRESDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-pg-app
+                  key: password
+            - name: QUEUE_BULL_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-redis
+                  key: password
+            # Must match Main's -- see the comment in 40-n8n-main.yaml.
+            - name: N8N_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-app
+                  key: encryptionKey
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 5
+---
+# Keeps at least one Worker consuming the queue through a voluntary disruption such as a node
+# drain. Involuntary failures ignore this -- it is a scheduling constraint, not a guarantee.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: n8n-worker
+  namespace: n8n
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: n8n
+      component: worker

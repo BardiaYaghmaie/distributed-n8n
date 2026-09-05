@@ -1,0 +1,11 @@
+# Nothing generated at deploy time belongs in git.
+*.log
+kubeconfig
+.env
+*.crt
+*.key
+
+# Local editor and agent settings, which are per-person and not part of the deployment.
+.claude/
+.vscode/
+.idea/
